@@ -11,56 +11,81 @@ export default function App() {
   const [providerRefs, setProviderRefs] = useState(null);
 
   const go = async () => {
-    setError("");
-    setStatus("Fetching index URL…");
-    setPickedLocation("");
-    setIndexPreview("");
-    setJsonPreview("");
-    setMatchData(null);
-    setProviderRefs(null);
+  setError("");
+  setStatus("Checking cache…");
+  setPickedLocation("");
+  setIndexPreview("");
+  setJsonPreview("");
+  setMatchData(null);
+  setProviderRefs(null);
 
-    try {
-      if (!/^[\d]+$/.test(digitCode)) throw new Error("Enter a numeric digit code (digits only).")
-
-      const res = await fetch("/api/get-index-url");
-      const data = await res.json();
-      if (!data.indexUrl) throw new Error("Could not fetch index URL from BCBSTX site.");
-      const indexUrl = data.indexUrl;
-
-      setStatus("Downloading index JSON…");
-      const idxRes = await fetch(`/api/proxy-index?url=${encodeURIComponent(indexUrl)}`);
-      if (!idxRes.ok) throw new Error(`Index request failed: HTTP ${idxRes.status}`);
-      const idx = await idxRes.json();
-      setIndexPreview(prettyPreview(idx));
-
-      setStatus('Locating "Blue Essentials in-network file"…');
-      const location = findBlueEssentialsLocation(idx);
-      if (!location) throw new Error('Could not find description "Blue Essentials in-network file".');
-      setPickedLocation(location);
-
-      // 4) Automatically trigger server decompression
-      setStatus("Decompressing file on server…");
-      const decompressRes = await fetch(`/api/decompress?url=${encodeURIComponent(location)}`);
-      if (!decompressRes.ok) throw new Error(`Decompression failed: HTTP ${decompressRes.status}`);
-      await decompressRes.json();
-
-      // 5) Then filter using stored decompressed data
-      setStatus("Filtering decompressed data…");
-      const filterRes = await fetch(`/api/filter-by-code?digitCode=${digitCode}`);
-      if (!filterRes.ok) throw new Error(`Filtering failed: HTTP ${filterRes.status}`);
-
-      const { match, provider_references } = await filterRes.json();
-      setMatchData(match);
-      setProviderRefs(provider_references);
-      setJsonPreview(prettyPreview(match));
-
-      setStatus("Done. Data filtered.");
-    } catch (e) {
-      console.error(e);
-      setError(e.message || String(e));
-      setStatus("");
+  try {
+    if (!/^[\d]+$/.test(digitCode)) {
+      throw new Error("Enter a numeric digit code (digits only).");
     }
-  };
+
+    // 1) If we already have /tmp/decompressed.json on the server, skip straight to filtering.
+    try {
+      const metaRes = await fetch("/api/decompressed-meta");
+      if (metaRes.ok) {
+        const meta = await metaRes.json();
+        if (meta.exists) {
+          setPickedLocation("(cached: /tmp/decompressed.json)");
+          setStatus("Filtering cached file…");
+          const filterRes = await fetch(`/api/filter-by-code?digitCode=${encodeURIComponent(digitCode)}`);
+          if (!filterRes.ok) throw new Error(`Filtering failed: HTTP ${filterRes.status}`);
+          const { match, provider_references } = await filterRes.json();
+          setMatchData(match);
+          setProviderRefs(provider_references);
+          setJsonPreview(prettyPreview(match));
+          setStatus("Done. Data filtered from cache.");
+          return; // ✅ we're done; no need to hit index/decompress
+        }
+      }
+    } catch {
+      // If the cache check fails for any reason, fall through to full flow.
+    }
+
+    // 2) Full flow (no cache): fetch index → find Blue Essentials file → decompress → filter.
+    setStatus("Fetching index URL…");
+    const res = await fetch("/api/get-index-url");
+    const data = await res.json();
+    if (!data.indexUrl) throw new Error("Could not fetch index URL from BCBSTX site.");
+    const indexUrl = data.indexUrl;
+
+    setStatus("Downloading index JSON…");
+    const idxRes = await fetch(`/api/proxy-index?url=${encodeURIComponent(indexUrl)}`);
+    if (!idxRes.ok) throw new Error(`Index request failed: HTTP ${idxRes.status}`);
+    const idx = await idxRes.json();
+    setIndexPreview(prettyPreview(idx));
+
+    setStatus('Locating "Blue Essentials in-network file"…');
+    const location = findBlueEssentialsLocation(idx);
+    if (!location) throw new Error('Could not find description "Blue Essentials in-network file".');
+    setPickedLocation(location);
+
+    setStatus("Decompressing file on server…");
+    const decompressRes = await fetch(`/api/decompress?url=${encodeURIComponent(location)}`);
+    if (!decompressRes.ok) throw new Error(`Decompression failed: HTTP ${decompressRes.status}`);
+    await decompressRes.json();
+
+    setStatus("Filtering decompressed data…");
+    const filterRes = await fetch(`/api/filter-by-code?digitCode=${encodeURIComponent(digitCode)}`);
+    if (!filterRes.ok) throw new Error(`Filtering failed: HTTP ${filterRes.status}`);
+
+    const { match, provider_references } = await filterRes.json();
+    setMatchData(match);
+    setProviderRefs(provider_references);
+    setJsonPreview(prettyPreview(match));
+
+    setStatus("Done. Data filtered.");
+  } catch (e) {
+    console.error(e);
+    setError(e.message || String(e));
+    setStatus("");
+  }
+};
+
 
   return (
     <div className="wrap">

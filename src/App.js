@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { inflate } from "pako";
 
 export default function App() {
   const [digitCode, setDigitCode] = useState("");
@@ -8,6 +7,8 @@ export default function App() {
   const [pickedLocation, setPickedLocation] = useState("");
   const [indexPreview, setIndexPreview] = useState("");
   const [jsonPreview, setJsonPreview] = useState("");
+  const [matchData, setMatchData] = useState(null);
+  const [providerRefs, setProviderRefs] = useState(null);
 
   const go = async () => {
     setError("");
@@ -15,61 +16,51 @@ export default function App() {
     setPickedLocation("");
     setIndexPreview("");
     setJsonPreview("");
-  
+    setMatchData(null);
+    setProviderRefs(null);
+
     try {
-      if (!/^\d+$/.test(digitCode)) throw new Error("Enter a numeric digit code (digits only).");
-  
-      // 1) Get the Index JSON URL from backend
+      if (!/^[\d]+$/.test(digitCode)) throw new Error("Enter a numeric digit code (digits only).")
+
       const res = await fetch("/api/get-index-url");
       const data = await res.json();
       if (!data.indexUrl) throw new Error("Could not fetch index URL from BCBSTX site.");
       const indexUrl = data.indexUrl;
-  
-      // 2) Fetch the JSON index
+
       setStatus("Downloading index JSON…");
       const idxRes = await fetch(`/api/proxy-index?url=${encodeURIComponent(indexUrl)}`);
       if (!idxRes.ok) throw new Error(`Index request failed: HTTP ${idxRes.status}`);
       const idx = await idxRes.json();
       setIndexPreview(prettyPreview(idx));
-  
-      // 3) Find the in-network file
+
       setStatus('Locating "Blue Essentials in-network file"…');
       const location = findBlueEssentialsLocation(idx);
       if (!location) throw new Error('Could not find description "Blue Essentials in-network file".');
       setPickedLocation(location);
-  
-      // 4) Download and stream preview via backend
-      setStatus("Streaming decompressed JSON preview…");
-      const proxyRes = await fetch(`/api/fetch-gz?url=${encodeURIComponent(location)}`);
-      if (!proxyRes.ok) throw new Error(`Backend fetch failed: HTTP ${proxyRes.status}`);
-  
-      // 5) Stream the response — read first ~100 KB
-      const reader = proxyRes.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let result = "";
-      let done = false;
-  
-      while (!done && result.length < 100000) {
-        const { value, done: readerDone } = await reader.read();
-        if (value) result += decoder.decode(value, { stream: true });
-        done = readerDone;
-      }
-  
-      const preview = result.slice(0, 5000) + (result.length > 5000 ? "\n…(truncated)…" : "");
-      setJsonPreview(preview);
-  
-      // 6) Optional: trigger full download
-      // Uncomment if you want to save full previewed chunk
-      // downloadFile(`Blue-Essentials_in-network.json`, result, "application/json");
-  
-      setStatus("Done. Preview ready.");
+
+      // 4) Automatically trigger server decompression
+      setStatus("Decompressing file on server…");
+      const decompressRes = await fetch(`/api/decompress?url=${encodeURIComponent(location)}`);
+      if (!decompressRes.ok) throw new Error(`Decompression failed: HTTP ${decompressRes.status}`);
+      await decompressRes.json();
+
+      // 5) Then filter using stored decompressed data
+      setStatus("Filtering decompressed data…");
+      const filterRes = await fetch(`/api/filter-by-code?digitCode=${digitCode}`);
+      if (!filterRes.ok) throw new Error(`Filtering failed: HTTP ${filterRes.status}`);
+
+      const { match, provider_references } = await filterRes.json();
+      setMatchData(match);
+      setProviderRefs(provider_references);
+      setJsonPreview(prettyPreview(match));
+
+      setStatus("Done. Data filtered.");
     } catch (e) {
       console.error(e);
       setError(e.message || String(e));
       setStatus("");
     }
   };
-  
 
   return (
     <div className="wrap">
@@ -101,8 +92,8 @@ export default function App() {
       </section>
 
       <section>
-        <h2>Decompressed JSON — preview</h2>
-        <pre className="mono">{jsonPreview || "—"}</pre>
+        <h2>Filtered Result (in_network)</h2>
+        <pre className="mono small">{jsonPreview || "—"}</pre>
       </section>
 
       <style>{css}</style>

@@ -8,12 +8,16 @@ import { promisify } from "util";
 import { PassThrough } from "stream";
 import fs from "fs";
 import path from "path";
+import cors from "cors";
 
-const TEMP_FILE = path.join("/tmp", "decompressed.json");
+const TEMP_FILE = process.env.DECOMPRESS_PATH || "/data/decompressed.json";
 const streamPipeline = promisify(pipeline);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+const allow = (process.env.CORS_ORIGIN || "*").split(",");
+app.use(cors({ origin: allow, credentials: false }));
 
 async function decompressToDisk(url, outputPath) {
   const res = await fetch(url);

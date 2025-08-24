@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from "react";
 
+const API_BASE = process.env.REACT_APP_API_BASE || "";
+
 /* ───────────────────────────────
    Tiny UI atoms
    ─────────────────────────────── */
@@ -99,7 +101,7 @@ export default function App() {
       setBusy(true);
       setStatus(`Fetching NPIs for ${val}…`);
       setError("");
-      const resp = await fetch(`/api/provider-npis?ids=${encodeURIComponent(val)}&debug=1`);
+      const resp = await api(`/api/provider-npis?ids=${encodeURIComponent(val)}&debug=1`);
       let payload;
       try {
         payload = await resp.json();
@@ -152,13 +154,13 @@ export default function App() {
 
       // 1) Use cached decompressed file if present
       try {
-        const metaRes = await fetch("/api/decompressed-meta");
+        const metaRes = await api("/api/decompressed-meta");
         if (metaRes.ok) {
           const meta = await metaRes.json();
           if (meta.exists) {
             setPickedLocation("(cached: /tmp/decompressed.json)");
             setStatus("Filtering cached file (first match) …");
-            const filterRes = await fetch(buildFilterUrl(digitCode));
+            const filterRes = await api(buildFilterUrl(digitCode));
             if (!filterRes.ok) {
               let msg = `Filtering failed: HTTP ${filterRes.status}`;
               try {
@@ -184,13 +186,13 @@ export default function App() {
 
       // 2) Full flow
       setStatus("Fetching index URL…");
-      const res = await fetch("/api/get-index-url");
+      const res = await api("/api/get-index-url");
       const data = await res.json();
       if (!data.indexUrl) throw new Error("Could not fetch index URL from BCBSTX site.");
       const indexUrl = data.indexUrl;
 
       setStatus("Downloading index JSON…");
-      const idxRes = await fetch(`/api/proxy-index?url=${encodeURIComponent(indexUrl)}`);
+      const idxRes = await api(`/api/proxy-index?url=${encodeURIComponent(indexUrl)}`);
       if (!idxRes.ok) throw new Error(`Index request failed: HTTP ${idxRes.status}`);
       const idx = await idxRes.json();
       setIndexPreview(prettyPreview(idx));
@@ -201,12 +203,12 @@ export default function App() {
       setPickedLocation(location);
 
       setStatus("Decompressing file on server…");
-      const decompressRes = await fetch(`/api/decompress?url=${encodeURIComponent(location)}`);
+      const decompressRes = await api(`/api/decompress?url=${encodeURIComponent(location)}`);
       if (!decompressRes.ok) throw new Error(`Decompression failed: HTTP ${decompressRes.status}`);
       await decompressRes.json();
 
       setStatus("Filtering decompressed data (first match) …");
-      const filterRes2 = await fetch(buildFilterUrl(digitCode));
+      const filterRes2 = await api(buildFilterUrl(digitCode));
       if (!filterRes2.ok) {
         let msg = `Filtering failed: HTTP ${filterRes2.status}`;
         try {
@@ -351,6 +353,10 @@ function prettyPreview(obj) {
   }
 }
 
+function api(path, init) {
+  return fetch(`${API_BASE}${path}`, init);
+}
+
 /* ───────────────────────────────
    NPI Cards (reused)
    ─────────────────────────────── */
@@ -384,7 +390,7 @@ function NpiCards({ npiList }) {
 
       const npi = numbers[i];
       try {
-        const resp = await fetch(`/api/npi?number=${encodeURIComponent(npi)}`);
+        const resp = await api(`/api/npi?number=${encodeURIComponent(npi)}`);
         let data;
         try {
           data = await resp.json();

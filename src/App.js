@@ -143,7 +143,7 @@ export default function App() {
     setProviderRefOptions([]);
 
     const buildFilterUrl = (code) =>
-      `/api/filter-by-code?digitCode=${encodeURIComponent(code)}&debug=1&first=1`; // first match for now
+      `/api/filter-by-code?digitCode=${encodeURIComponent(code)}&debug=1`; // first match for now
 
     try {
       if (!/^[\d]+$/.test(digitCode)) {

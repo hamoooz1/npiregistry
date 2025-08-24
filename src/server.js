@@ -79,6 +79,8 @@ app.get("/api/filter-by-code", async (req, res) => {
   const DEBUG = String(debug) === "1";
   const USE_FIRST = String(first) === "1";
 
+  if (DEBUG) console.log(`[DBG] Mode: ${USE_FIRST ? "FIRST" : "SEARCH"}; digitCode=${digitCode ?? "(none)"}`);
+
   // Only require numeric code when NOT using first=1
   if (!USE_FIRST && !/^\d+$/.test(String(digitCode || ""))) {
     return res.status(400).json({ error: "digitCode must be numeric" });

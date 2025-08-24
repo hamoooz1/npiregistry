@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 export default function App() {
   const [digitCode, setDigitCode] = useState("");
@@ -128,6 +128,8 @@ export default function App() {
             setJsonPreview(prettyPreview(match));
             // populate picklists
             setupPicklistsForMatch(match);
+            setSelectedProviderRef("");
+            setNpiList([]);
             setStatus("Done. Data filtered from cache (first match).");
             return;
           }
@@ -173,7 +175,8 @@ export default function App() {
       setJsonPreview(prettyPreview(match2));
       // populate picklists
       setupPicklistsForMatch(match2);
-
+      setSelectedProviderRef("");
+      setNpiList([]);
       setStatus("Done. Data filtered.");
     } catch (e) {
       console.error(e);
@@ -186,8 +189,6 @@ export default function App() {
 
   return (
     <div className="wrap">
-      <h1>Step 1 — Fetch Blue Essentials In-Network JSON</h1>
-
       <div className="row">
         <label>Digit code</label>
         <input
@@ -245,9 +246,9 @@ export default function App() {
             </div>
 
             {npiList.length > 0 && (
-              <pre className="mono small" style={{ maxHeight: 180 }}>
-                {JSON.stringify(npiList, null, 2)}
-              </pre>
+            <pre className="mono small" style={{ maxHeight: 180 }}>
+              {JSON.stringify(npiList, null, 2)}
+            </pre>
             )}
           </>
         ) : (
@@ -255,22 +256,7 @@ export default function App() {
         )}
       </section>
 
-
-      <section>
-        <h2>Matched .json.gz location</h2>
-        <pre className="mono small">{pickedLocation || "—"}</pre>
-      </section>
-
-      <section>
-        <h2>Index JSON — preview</h2>
-        <pre className="mono small">{indexPreview || "—"}</pre>
-      </section>
-
-      <section>
-        <h2>Filtered Result (in_network)</h2>
-        <pre className="mono small">{jsonPreview || "—"}</pre>
-      </section>
-
+      <NpiCards npiList={npiList} />
       <style>{css}</style>
     </div>
   );
@@ -322,4 +308,153 @@ const css = `
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; background: #fafafa; border: 1px solid #eee; border-radius: 8px; padding: 10px; overflow: auto; }
   .small { font-size: 12px; }
   pre { max-height: 360px; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; margin-top: 8px; }
+.card { border: 1px solid #eee; border-radius: 10px; padding: 12px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+.card.error { border-color: #f4c7c7; background: #fff8f8; }
+.title { font-weight: 600; margin-bottom: 2px; }
+.muted { color: #666; font-size: 12px; margin-bottom: 8px; }
+.line { display: grid; grid-template-columns: 110px 1fr; gap: 8px; margin: 4px 0; }
+.label { color: #555; font-size: 12px; }
+.err { color: #b00020; font-size: 13px; }
+
 `;
+
+function NpiCards({ npiList }) {
+  const [entries, setEntries] = useState({});   // { "1234567890": resultObject|null }
+  const [errors, setErrors] = useState({});     // { "1234567890": "error msg" }
+  const [pending, setPending] = useState(0);
+
+  // fetch with modest concurrency and caching per render
+  useEffect(() => {
+    const numbers = Array.from(new Set((npiList || []).map(n => String(n).padStart(10, "0"))));
+    if (!numbers.length) {
+      setEntries({});
+      setErrors({});
+      setPending(0);
+      return;
+    }
+
+    let cancelled = false;
+    setEntries({});
+    setErrors({});
+    setPending(numbers.length);
+
+    const CONCURRENCY = 6;
+    let cursor = 0;
+
+    const runNext = async () => {
+      if (cancelled) return;
+      const i = cursor++;
+      if (i >= numbers.length) return;
+
+      const npi = numbers[i];
+      try {
+        const resp = await fetch(`/api/npi?number=${encodeURIComponent(npi)}`);
+        let data;
+        try {
+          data = await resp.json();
+        } catch {
+          const txt = await resp.text();
+          throw new Error(`HTTP ${resp.status} — ${txt.slice(0, 200)}`);
+        }
+        if (!resp.ok) {
+          throw new Error(data?.Errors?.[0]?.description || data?.error || `HTTP ${resp.status}`);
+        }
+        const result = Array.isArray(data?.results) ? data.results[0] : null;
+        setEntries(prev => ({ ...prev, [npi]: result }));
+      } catch (e) {
+        setErrors(prev => ({ ...prev, [npi]: e.message || String(e) }));
+      } finally {
+        setPending(p => p - 1);
+        runNext(); // kick the next in queue
+      }
+    };
+
+    // start workers
+    for (let k = 0; k < Math.min(CONCURRENCY, numbers.length); k++) runNext();
+
+    return () => { cancelled = true; };
+  }, [npiList]);
+
+  const numbers = Object.keys(entries).length || Object.keys(errors).length
+    ? Array.from(new Set((npiList || []).map(n => String(n).padStart(10, "0"))))
+    : [];
+
+  return (
+    <section>
+      <h2>NPI Profiles {pending > 0 ? `(loading ${pending}…)` : ""}</h2>
+      {!numbers.length ? (
+        <div className="mono small">— Provide NPIs —</div>
+      ) : (
+        <div className="card-grid">
+          {numbers.map(npi => (
+            <NpiCard key={npi} npi={npi} result={entries[npi]} error={errors[npi]} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NpiCard({ npi, result, error }) {
+  if (error) {
+    return (
+      <div className="card error">
+        <div className="muted">NPI {npi}</div>
+        <div className="err">{error}</div>
+      </div>
+    );
+  }
+  if (result === undefined) {
+    return (
+      <div className="card">
+        <div className="muted">NPI {npi}</div>
+        <div>Loading…</div>
+      </div>
+    );
+  }
+  if (result === null) {
+    return (
+      <div className="card">
+        <div className="muted">NPI {npi}</div>
+        <div>Not found.</div>
+      </div>
+    );
+  }
+
+  // shape the data
+  const basic = result.basic || {};
+  const name =
+    basic.organization_name ||
+    [basic.first_name, basic.middle_name, basic.last_name].filter(Boolean).join(" ") ||
+    `NPI ${npi}`;
+  const credential = basic.credential;
+  const enumDate = basic.enumeration_date;
+  const lastUpdated = basic.last_updated;
+
+  const tax = Array.isArray(result.taxonomies) ? result.taxonomies : [];
+  const primaryTax = tax.find(t => t.primary) || tax[0];
+  const taxLine = primaryTax
+    ? `${primaryTax.desc || primaryTax.code}${primaryTax.state ? ` — ${primaryTax.state}` : ""}${primaryTax.license ? ` — Lic ${primaryTax.license}` : ""}`
+    : "—";
+
+  const addresses = Array.isArray(result.addresses) ? result.addresses : [];
+  const loc = addresses.find(a => a.address_purpose === "LOCATION") || addresses[0];
+  const addr = loc
+    ? `${loc.address_1 || ""}${loc.address_2 ? `, ${loc.address_2}` : ""}, ${loc.city || ""}, ${loc.state || ""} ${loc.postal_code || ""}`
+    : "—";
+  const phone = loc?.telephone_number || "—";
+  const fax = loc?.fax_number || "";
+
+  return (
+    <div className="card">
+      <div className="title">{name}{credential ? `, ${credential}` : ""}</div>
+      <div className="muted">NPI {npi} • {basic.status || "—"}</div>
+      <div className="line"><span className="label">Taxonomy</span><span>{taxLine}</span></div>
+      <div className="line"><span className="label">Location</span><span>{addr}</span></div>
+      <div className="line"><span className="label">Phone</span><span>{phone}{fax ? ` • Fax ${fax}` : ""}</span></div>
+      <div className="line"><span className="label">Enumerated</span><span>{enumDate || "—"}</span></div>
+      <div className="line"><span className="label">Last updated</span><span>{lastUpdated || "—"}</span></div>
+    </div>
+  );
+}

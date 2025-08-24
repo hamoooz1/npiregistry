@@ -475,6 +475,23 @@ app.get("/api/provider-npis", async (req, res) => {
   return res.json({ by_id: results, found, missing });
 });
 
+// GET /api/npi?number=1234567890
+app.get("/api/npi", async (req, res) => {
+  const number = String(req.query.number || "").trim();
+  if (!/^\d{10}$/.test(number)) {
+    return res.status(400).json({ error: "number must be a 10-digit NPI" });
+  }
+  try {
+    const url = `https://npiregistry.cms.hhs.gov/api/?version=2.1&number=${number}`;
+    const r = await fetch(url, { headers: { Accept: "application/json" } });
+    const body = await r.text(); // pass-through (and better error text)
+    res.status(r.status);
+    res.setHeader("Content-Type", "application/json");
+    return res.send(body);
+  } catch (e) {
+    return res.status(502).json({ error: `Upstream error: ${e.message}` });
+  }
+});
 
 
 app.listen(PORT, () => {

@@ -9,6 +9,9 @@ export default function App() {
   const [jsonPreview, setJsonPreview] = useState("");
   const [matchData, setMatchData] = useState(null);
   const [providerRefs, setProviderRefs] = useState(null);
+  const [selectedProviderRef, setSelectedProviderRef] = useState("");
+  const [npiList, setNpiList] = useState([]); // numbers
+
 
   // NEW: picklist state lives in component
   const [rateOptions, setRateOptions] = useState([]);          // [{ idx, price, label }]
@@ -34,6 +37,8 @@ export default function App() {
     setRateOptions(rates);
     setSelectedRateIdx("");     // no preselect
     setProviderRefOptions([]);  // clear until user picks a rate
+    setSelectedProviderRef("");
+    setNpiList([]);
   }
 
   function onSelectRate(e) {
@@ -47,7 +52,40 @@ export default function App() {
     // setProviderRefs(refs);
   }
 
+  async function onSelectProviderRef(e) {
+    const val = e.target.value;
+    setSelectedProviderRef(val);
+    setNpiList([]);
+
+    if (!val) return;
+
+    try {
+      setStatus(`Fetching NPIs for ${val}…`);
+      const resp = await fetch(`/api/provider-npis?ids=${encodeURIComponent(val)}&debug=1`);
+      let payload;
+      try {
+        payload = await resp.json();
+      } catch {
+        const txt = await resp.text();
+        throw new Error(`HTTP ${resp.status} — ${txt}`);
+      }
+      if (!resp.ok) throw new Error(payload?.error || `HTTP ${resp.status}`);
+
+      const npis = payload?.by_id?.[val]?.npis || [];
+      setNpiList(npis);
+      setStatus(`Loaded NPIs for ${val}`);
+    } catch (err) {
+      console.error(err);
+      setError(err.message || String(err));
+      setStatus("");
+    }
+  }
+
   const go = async () => {
+    setSelectedProviderRef("");
+    setNpiList([]);
+
+
     if (window.__GO_BUSY) return;
     window.__GO_BUSY = true;
 
@@ -81,7 +119,7 @@ export default function App() {
             const filterRes = await fetch(buildFilterUrl(digitCode));
             if (!filterRes.ok) {
               let msg = `Filtering failed: HTTP ${filterRes.status}`;
-              try { const j = await filterRes.json(); if (j?.error) msg += ` — ${j.error}`; } catch {}
+              try { const j = await filterRes.json(); if (j?.error) msg += ` — ${j.error}`; } catch { }
               throw new Error(msg);
             }
             const { match, provider_references } = await filterRes.json();
@@ -125,7 +163,7 @@ export default function App() {
       const filterRes2 = await fetch(buildFilterUrl(digitCode));
       if (!filterRes2.ok) {
         let msg = `Filtering failed: HTTP ${filterRes2.status}`;
-        try { const j = await filterRes2.json(); if (j?.error) msg += ` — ${j.error}`; } catch {}
+        try { const j = await filterRes2.json(); if (j?.error) msg += ` — ${j.error}`; } catch { }
         throw new Error(msg);
       }
 
@@ -186,15 +224,37 @@ export default function App() {
         {selectedRateIdx === "" ? (
           <div className="mono small">— Pick a rate above —</div>
         ) : providerRefOptions.length ? (
-          <select multiple size={Math.min(10, Math.max(5, providerRefOptions.length))}>
-            {providerRefOptions.map((ref, i) => (
-              <option key={i} value={String(ref)}>{String(ref)}</option>
-            ))}
-          </select>
+          <>
+            <select
+              value={selectedProviderRef}
+              onChange={onSelectProviderRef}
+            >
+              <option value="">— Select a provider reference —</option>
+              {providerRefOptions.map((ref, i) => (
+                <option key={i} value={String(ref)}>{String(ref)}</option>
+              ))}
+            </select>
+
+            <div style={{ marginTop: 8 }}>
+              <strong>NPIs:</strong>{" "}
+              {npiList.length
+                ? `${npiList.length} found`
+                : selectedProviderRef
+                  ? "— none —"
+                  : "— pick a provider reference —"}
+            </div>
+
+            {npiList.length > 0 && (
+              <pre className="mono small" style={{ maxHeight: 180 }}>
+                {JSON.stringify(npiList, null, 2)}
+              </pre>
+            )}
+          </>
         ) : (
           <div className="mono small">— No provider references on this rate —</div>
         )}
       </section>
+
 
       <section>
         <h2>Matched .json.gz location</h2>

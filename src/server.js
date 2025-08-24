@@ -243,8 +243,6 @@ app.get("/api/filter-by-code", async (req, res) => {
   return res.json(result);
 });
 
-
-
 app.get("/api/get-index-url", async (req, res) => {
   try {
     const response = await fetch("https://www.bcbstx.com/member/machine-readable-files");
@@ -305,6 +303,179 @@ app.get("/api/decompressed-meta", (req, res) => {
     return res.status(500).json({ error: e.message });
   }
 });
+
+
+// GET /api/provider-npis?ids=400.1227337,400.141759&debug=1
+app.get("/api/provider-npis", async (req, res) => {
+  const { ids = "", debug } = req.query;
+  const DEBUG = String(debug) === "1";
+
+  if (!fs.existsSync(TEMP_FILE)) {
+    return res.status(404).json({ error: "Decompressed file not found." });
+  }
+
+  // normalize requested IDs as strings (we'll compare by string)
+  const requested = new Set(
+    String(ids)
+      .split(",")
+      .map(s => s.trim())
+      .filter(Boolean)
+  );
+  if (requested.size === 0) {
+    return res.status(400).json({ error: "Provide ids query param (comma-separated)." });
+  }
+
+  const TOKEN = '"provider_references"';
+  const CHUNK = 8 * 1024 * 1024;
+
+  if (DEBUG) {
+    console.log(`[DBG] provider-npis: looking for ${requested.size} id(s): ${Array.from(requested).slice(0,5).join(", ")}${requested.size>5?" …":""}`);
+  }
+
+  // --- Phase 1: find "provider_references" token offset ---
+  let offset = -1;
+  {
+    const s = fs.createReadStream(TEMP_FILE, { highWaterMark: CHUNK });
+    let base = 0, tail = "";
+    await new Promise((resolve, reject) => {
+      s.on("data", (buf) => {
+        const prevTailBytes = Buffer.byteLength(tail, "utf8");
+        const text = tail + buf.toString("utf8");
+        const idx = text.indexOf(TOKEN);
+        if (idx !== -1 && offset === -1) {
+          offset = base - prevTailBytes + idx;
+          s.destroy();
+          return;
+        }
+        tail = text.slice(-64);
+        base += Buffer.byteLength(text, "utf8") - Buffer.byteLength(tail, "utf8");
+      });
+      s.on("close", resolve);
+      s.on("error", reject);
+    });
+  }
+  if (offset === -1) {
+    if (DEBUG) console.log("[DBG] provider-npis: 'provider_references' not found");
+    return res.status(404).json({ error: "'provider_references' not found in file" });
+  }
+  if (DEBUG) console.log(`[DBG] provider-npis: found token at byte ${offset.toLocaleString()}`);
+
+  // --- Phase 2: stream the array and capture objects one-by-one ---
+  const stream = fs.createReadStream(TEMP_FILE, { start: offset, highWaterMark: CHUNK });
+
+  let inString = false, escaped = false;
+  let foundArray = false, arrayDepth = 0;
+  let capturing = false, objBuf = "", objDepth = 0;
+
+  const results = {}; // by_id: { "<id>": { provider_group_id: "<id>", npis: [ ... ] } }
+  let remaining = new Set(requested);
+
+  function appendNPIs(obj) {
+    const k = String(obj?.provider_group_id);
+    if (!k) return;
+    const dest = results[k] || { provider_group_id: k, npis: [] };
+    const seen = new Set(dest.npis);
+    const groups = Array.isArray(obj?.provider_groups) ? obj.provider_groups : [];
+    for (const g of groups) {
+      const npis = Array.isArray(g?.npi) ? g.npi : [];
+      for (const n of npis) {
+        if (!seen.has(n)) { seen.add(n); dest.npis.push(n); }
+      }
+    }
+    results[k] = dest;
+  }
+
+  function feed(ch) {
+    // If capturing an object, append char first, then update state
+    if (capturing) {
+      objBuf += ch;
+
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+      } else {
+        if (ch === '"') { inString = true; escaped = false; }
+        else if (ch === "{") objDepth++;
+        else if (ch === "}") objDepth--;
+      }
+
+      if (!inString && objDepth === 0) {
+        try {
+          const parsed = JSON.parse(objBuf);
+          const idStr = String(parsed?.provider_group_id);
+          if (remaining.has(idStr)) {
+            appendNPIs(parsed);
+            remaining.delete(idStr);
+            if (DEBUG) console.log(`[DBG] provider-npis: found id ${idStr}, remaining=${remaining.size}`);
+            if (remaining.size === 0) {
+              stream.destroy(); // we have all requested
+              return true;
+            }
+          }
+        } catch (e) {
+          if (DEBUG) {
+            console.log("[DBG] provider-npis: parse error (ignored):", e.message);
+            console.log("[DBG]   head:", objBuf.slice(0, 100).replace(/\n/g, "\\n"));
+          }
+        }
+        // reset for next object
+        capturing = false;
+        objBuf = "";
+      }
+      return false;
+    }
+
+    // not capturing: handle string state for array detection
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      return false;
+    } else {
+      if (ch === '"') { inString = true; escaped = false; return false; }
+    }
+
+    if (!foundArray) {
+      if (ch === "[") { foundArray = true; arrayDepth = 1; }
+      return false;
+    }
+
+    // once inside the array:
+    if (ch === "{") { capturing = true; objBuf = "{" ; objDepth = 1; return false; }
+    if (ch === "[") { arrayDepth++; return false; }
+    if (ch === "]") { arrayDepth--; return false; }
+
+    return false;
+  }
+
+  let completedEarly = false;
+  await new Promise((resolve, reject) => {
+    stream.on("data", (chunk) => {
+      const text = chunk.toString("utf8");
+      for (let i = 0; i < text.length; i++) {
+        if (feed(text[i])) { completedEarly = true; break; }
+        if (foundArray && arrayDepth === 0 && !capturing) { // end of array
+          stream.destroy();
+          break;
+        }
+      }
+    });
+    stream.on("close", resolve);
+    stream.on("error", reject);
+  });
+
+  const found = Object.keys(results);
+  const missing = Array.from(requested).filter(id => !results[id]);
+
+  if (DEBUG) {
+    console.log(`[DBG] provider-npis: done. found=${found.length}, missing=${missing.length}, earlyStop=${completedEarly}`);
+  }
+
+  return res.json({ by_id: results, found, missing });
+});
+
+
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

@@ -10,86 +10,145 @@ export default function App() {
   const [matchData, setMatchData] = useState(null);
   const [providerRefs, setProviderRefs] = useState(null);
 
-  const go = async () => {
-  setError("");
-  setStatus("Checking cache…");
-  setPickedLocation("");
-  setIndexPreview("");
-  setJsonPreview("");
-  setMatchData(null);
-  setProviderRefs(null);
+  // NEW: picklist state lives in component
+  const [rateOptions, setRateOptions] = useState([]);          // [{ idx, price, label }]
+  const [selectedRateIdx, setSelectedRateIdx] = useState("");  // string index into negotiated_rates
+  const [providerRefOptions, setProviderRefOptions] = useState([]); // numbers for chosen rate
 
-  try {
-    if (!/^[\d]+$/.test(digitCode)) {
-      throw new Error("Enter a numeric digit code (digits only).");
-    }
-
-    // 1) If we already have /tmp/decompressed.json on the server, skip straight to filtering.
-    try {
-      const metaRes = await fetch("/api/decompressed-meta");
-      if (metaRes.ok) {
-        const meta = await metaRes.json();
-        if (meta.exists) {
-          setPickedLocation("(cached: /tmp/decompressed.json)");
-          setStatus("Filtering cached file…");
-          const filterRes = await fetch(`/api/filter-by-code?digitCode=${encodeURIComponent(digitCode)}`);
-          if (!filterRes.ok) throw new Error(`Filtering failed: HTTP ${filterRes.status}`);
-          const { match, provider_references } = await filterRes.json();
-          setMatchData(match);
-          setProviderRefs(provider_references);
-          setJsonPreview(prettyPreview(match));
-          setStatus("Done. Data filtered from cache.");
-          return; // ✅ we're done; no need to hit index/decompress
-        }
+  // --- Helpers that touch state MUST be inside the component ---
+  function buildRateOptions(match) {
+    const out = [];
+    const nrs = Array.isArray(match?.negotiated_rates) ? match.negotiated_rates : [];
+    nrs.forEach((nr, idx) => {
+      const np = Array.isArray(nr?.negotiated_prices) ? nr.negotiated_prices : [];
+      const price = np[0]?.negotiated_rate;
+      if (price !== undefined && price !== null) {
+        out.push({ idx, price, label: String(price) });
       }
-    } catch {
-      // If the cache check fails for any reason, fall through to full flow.
-    }
-
-    // 2) Full flow (no cache): fetch index → find Blue Essentials file → decompress → filter.
-    setStatus("Fetching index URL…");
-    const res = await fetch("/api/get-index-url");
-    const data = await res.json();
-    if (!data.indexUrl) throw new Error("Could not fetch index URL from BCBSTX site.");
-    const indexUrl = data.indexUrl;
-
-    setStatus("Downloading index JSON…");
-    const idxRes = await fetch(`/api/proxy-index?url=${encodeURIComponent(indexUrl)}`);
-    if (!idxRes.ok) throw new Error(`Index request failed: HTTP ${idxRes.status}`);
-    const idx = await idxRes.json();
-    setIndexPreview(prettyPreview(idx));
-
-    setStatus('Locating "Blue Essentials in-network file"…');
-    const location = findBlueEssentialsLocation(idx);
-    if (!location) throw new Error('Could not find description "Blue Essentials in-network file".');
-    setPickedLocation(location);
-
-    setStatus("Decompressing file on server…");
-    const decompressRes = await fetch(`/api/decompress?url=${encodeURIComponent(location)}`);
-    if (!decompressRes.ok) throw new Error(`Decompression failed: HTTP ${decompressRes.status}`);
-    await decompressRes.json();
-
-    setStatus("Filtering decompressed data…");
-    const filterRes = await fetch(`/api/filter-by-code?digitCode=${encodeURIComponent(digitCode)}`);
-    if (!filterRes.ok) throw new Error(`Filtering failed: HTTP ${filterRes.status}`);
-
-    const { match, provider_references } = await filterRes.json();
-    setMatchData(match);
-    setProviderRefs(provider_references);
-    setJsonPreview(prettyPreview(match));
-
-    setStatus("Done. Data filtered.");
-  } catch (e) {
-    console.error(e);
-    setError(e.message || String(e));
-    setStatus("");
+    });
+    return out;
   }
-};
 
+  function setupPicklistsForMatch(match) {
+    const rates = buildRateOptions(match);
+    setRateOptions(rates);
+    setSelectedRateIdx("");     // no preselect
+    setProviderRefOptions([]);  // clear until user picks a rate
+  }
+
+  function onSelectRate(e) {
+    const val = e.target.value;       // string index
+    setSelectedRateIdx(val);
+    const idx = Number(val);
+    const nr = matchData?.negotiated_rates?.[idx];
+    const refs = Array.isArray(nr?.provider_references) ? nr.provider_references : [];
+    setProviderRefOptions(refs);
+    // If you also want to mirror into providerRefs:
+    // setProviderRefs(refs);
+  }
+
+  const go = async () => {
+    if (window.__GO_BUSY) return;
+    window.__GO_BUSY = true;
+
+    setError("");
+    setStatus("Checking cache…");
+    setPickedLocation("");
+    setIndexPreview("");
+    setJsonPreview("");
+    setMatchData(null);
+    setProviderRefs(null);
+    setRateOptions([]);
+    setSelectedRateIdx("");
+    setProviderRefOptions([]);
+
+    const buildFilterUrl = (code) =>
+      `/api/filter-by-code?digitCode=${encodeURIComponent(code)}&debug=1&first=1`; // using first match for now
+
+    try {
+      if (!/^[\d]+$/.test(digitCode)) {
+        throw new Error("Enter a numeric digit code (digits only).");
+      }
+
+      // 1) Use cached decompressed file if present
+      try {
+        const metaRes = await fetch("/api/decompressed-meta");
+        if (metaRes.ok) {
+          const meta = await metaRes.json();
+          if (meta.exists) {
+            setPickedLocation("(cached: /tmp/decompressed.json)");
+            setStatus("Filtering cached file (first match) …");
+            const filterRes = await fetch(buildFilterUrl(digitCode));
+            if (!filterRes.ok) {
+              let msg = `Filtering failed: HTTP ${filterRes.status}`;
+              try { const j = await filterRes.json(); if (j?.error) msg += ` — ${j.error}`; } catch {}
+              throw new Error(msg);
+            }
+            const { match, provider_references } = await filterRes.json();
+            setMatchData(match);
+            setProviderRefs(provider_references);
+            setJsonPreview(prettyPreview(match));
+            // populate picklists
+            setupPicklistsForMatch(match);
+            setStatus("Done. Data filtered from cache (first match).");
+            return;
+          }
+        }
+      } catch {
+        // fall through to full flow
+      }
+
+      // 2) Full flow
+      setStatus("Fetching index URL…");
+      const res = await fetch("/api/get-index-url");
+      const data = await res.json();
+      if (!data.indexUrl) throw new Error("Could not fetch index URL from BCBSTX site.");
+      const indexUrl = data.indexUrl;
+
+      setStatus("Downloading index JSON…");
+      const idxRes = await fetch(`/api/proxy-index?url=${encodeURIComponent(indexUrl)}`);
+      if (!idxRes.ok) throw new Error(`Index request failed: HTTP ${idxRes.status}`);
+      const idx = await idxRes.json();
+      setIndexPreview(prettyPreview(idx));
+
+      setStatus('Locating "Blue Essentials in-network file"…');
+      const location = findBlueEssentialsLocation(idx);
+      if (!location) throw new Error('Could not find description "Blue Essentials in-network file".');
+      setPickedLocation(location);
+
+      setStatus("Decompressing file on server…");
+      const decompressRes = await fetch(`/api/decompress?url=${encodeURIComponent(location)}`);
+      if (!decompressRes.ok) throw new Error(`Decompression failed: HTTP ${decompressRes.status}`);
+      await decompressRes.json();
+
+      setStatus("Filtering decompressed data (first match) …");
+      const filterRes2 = await fetch(buildFilterUrl(digitCode));
+      if (!filterRes2.ok) {
+        let msg = `Filtering failed: HTTP ${filterRes2.status}`;
+        try { const j = await filterRes2.json(); if (j?.error) msg += ` — ${j.error}`; } catch {}
+        throw new Error(msg);
+      }
+
+      const { match: match2, provider_references: providerRefs2 } = await filterRes2.json();
+      setMatchData(match2);
+      setProviderRefs(providerRefs2);
+      setJsonPreview(prettyPreview(match2));
+      // populate picklists
+      setupPicklistsForMatch(match2);
+
+      setStatus("Done. Data filtered.");
+    } catch (e) {
+      console.error(e);
+      setError(e.message || String(e));
+      setStatus("");
+    } finally {
+      window.__GO_BUSY = false;
+    }
+  };
 
   return (
     <div className="wrap">
-      <h1>Step 1 — Fetch Blue Essentials In‑Network JSON</h1>
+      <h1>Step 1 — Fetch Blue Essentials In-Network JSON</h1>
 
       <div className="row">
         <label>Digit code</label>
@@ -105,6 +164,37 @@ export default function App() {
 
       {status && <div className="status">{status}</div>}
       {error && <div className="error">Error: {error}</div>}
+
+      <section>
+        <h2>Pick a negotiated rate</h2>
+        {rateOptions.length ? (
+          <select value={selectedRateIdx} onChange={onSelectRate}>
+            <option value="">— Select a rate —</option>
+            {rateOptions.map((o) => (
+              <option key={o.idx} value={o.idx}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <div className="mono small">— No negotiated rates found —</div>
+        )}
+      </section>
+
+      <section>
+        <h2>Provider references for selected rate</h2>
+        {selectedRateIdx === "" ? (
+          <div className="mono small">— Pick a rate above —</div>
+        ) : providerRefOptions.length ? (
+          <select multiple size={Math.min(10, Math.max(5, providerRefOptions.length))}>
+            {providerRefOptions.map((ref, i) => (
+              <option key={i} value={String(ref)}>{String(ref)}</option>
+            ))}
+          </select>
+        ) : (
+          <div className="mono small">— No provider references on this rate —</div>
+        )}
+      </section>
 
       <section>
         <h2>Matched .json.gz location</h2>
@@ -126,7 +216,7 @@ export default function App() {
   );
 }
 
-// --- Helpers ---
+// --- Non-state helpers can stay outside ---
 function findBlueEssentialsLocation(idx) {
   if (!idx || !Array.isArray(idx.reporting_structure)) return null;
   for (const s of idx.reporting_structure) {
@@ -160,7 +250,6 @@ function downloadFile(filename, content, mime) {
   URL.revokeObjectURL(url);
 }
 
-// --- Inline CSS ---
 const css = `
   .wrap { max-width: 980px; margin: 32px auto; padding: 16px; font-family: system-ui, sans-serif; }
   h1 { font-size: 22px; margin-bottom: 12px; }

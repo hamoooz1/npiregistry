@@ -242,8 +242,8 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="dot" />
-          <span>Blue Essentials Explorer</span>
+          <img src="/sptLogo.png" className="brand-logo" alt="SPT logo" />
+          <span>In Network Finder</span>
         </div>
         <div className="actions">
           <button className="btn ghost" onClick={() => window.location.reload()}>
@@ -318,7 +318,7 @@ export default function App() {
         </div>
 
         {/* Profile cards */}
-          <NpiCards npiList={npiList} />
+        <NpiCards npiList={npiList} />
       </main>
 
       <style>{css}</style>
@@ -422,31 +422,31 @@ function NpiCards({ npiList }) {
       ? Array.from(new Set((npiList || []).map((n) => String(n).padStart(10, "0"))))
       : [];
 
-      return (
-        <section className="npisection">
-          <div className="npiheader">
-            <h2>NPI Profiles</h2>
-            {pending > 0 && (
-              <div className="pending">
-                <LoadingSpinner />
-                <span>Loading {pending}…</span>
-              </div>
-            )}
+  return (
+    <section className="npisection">
+      <div className="npiheader">
+        <h2>NPI Profiles</h2>
+        {pending > 0 && (
+          <div className="pending">
+            <LoadingSpinner />
+            <span>Loading {pending}…</span>
           </div>
-      
-          <div className="npiscroll">
-            {!numbers.length ? (
-              <div className="muted mono small">— Provide NPIs —</div>
-            ) : (
-              <div className="card-grid">
-                {numbers.map((npi) => (
-                  <NpiCard key={npi} npi={npi} result={entries[npi]} error={errors[npi]} />
-                ))}
-              </div>
-            )}
+        )}
+      </div>
+
+      <div className="npiscroll">
+        {!numbers.length ? (
+          <div className="muted mono small">— Provide NPIs —</div>
+        ) : (
+          <div className="card-grid">
+            {numbers.map((npi) => (
+              <NpiCard key={npi} npi={npi} result={entries[npi]} error={errors[npi]} />
+            ))}
           </div>
-        </section>
-      );
+        )}
+      </div>
+    </section>
+  );
 }
 
 function NpiCard({ npi, result, error }) {
@@ -571,6 +571,8 @@ html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
 }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .2px; }
 .brand .dot{ width: 10px; height: 10px; border-radius: 999px; background: linear-gradient(135deg, var(--accent), var(--primary)); box-shadow: 0 0 14px var(--accent); }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .2px; }
+.brand-logo { height: 22px; width: auto; display: block; }
 
 .wrap { width: 100%; max-width: 1100px; margin: 28px auto; padding: 0 16px; }
 h1 { font-size: 22px; margin: 0 0 12px; }

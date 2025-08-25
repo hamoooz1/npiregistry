@@ -1,0 +1,17 @@
+{
+  "name": "api",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": { 
+    "start": "node server.js",
+    "server": "cross-env DECOMPRESS_PATH=./data/decompressed.json node server/server.js"
+   },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "node-fetch": "^3.3.2",
+    "zlib": "^1.0.5"
+  }
+}

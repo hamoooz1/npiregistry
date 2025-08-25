@@ -2,10 +2,8 @@ import express from "express";
 import fetch from "node-fetch";
 import { load } from "cheerio";
 import zlib from "zlib";
-import { createInterface } from "readline";
-import { pipeline } from "stream";
+import { pipeline, PassThrough } from "stream";
 import { promisify } from "util";
-import { PassThrough } from "stream";
 import fs from "fs";
 import path from "path";
 import cors from "cors";
@@ -34,20 +32,86 @@ async function decompressToDisk(url, outputPath) {
   await streamPipeline(res.body, gunzip, destStream);
 }
 
+async function decompressToDiskSmart(url, outputPath, { debug = false } = {}) {
+  const headers = { Accept: "*/*", "User-Agent": "npiregistry/0.1 (+local)" };
+
+  const fetchOnce = async () => {
+    const r = await fetch(url, { headers });
+    if (!r.ok) {
+      let snippet = "";
+      try { snippet = (await r.text()).slice(0, 1000); } catch { }
+      throw new Error(`Upstream ${r.status} ${r.statusText}; headers: ${JSON.stringify(Object.fromEntries(r.headers))
+        }; body: ${snippet}`);
+    }
+    return r;
+  };
+
+  // ensure output dir exists
+  const dir = path.dirname(outputPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  // fetch & peek first chunk to detect gzip
+  let res = await fetchOnce();
+  const src = res.body;
+  const tee = new PassThrough();
+  let firstChunk;
+
+  await new Promise((resolve, reject) => {
+    src.once("data", (chunk) => { firstChunk = chunk; tee.write(chunk); src.pipe(tee); resolve(); });
+    src.once("error", reject);
+  });
+
+  const looksGzip = firstChunk && firstChunk[0] === 0x1f && firstChunk[1] === 0x8b;
+  if (debug) {
+    console.log(`[DBG] decompress: CE=${res.headers.get("content-encoding") || "(none)"} `
+      + `CT=${res.headers.get("content-type") || "(none)"} looksGzip=${!!looksGzip}`);
+  }
+
+  const dest = fs.createWriteStream(outputPath, { flags: "w" });
+
+  try {
+    if (looksGzip) {
+      if (debug) console.log("[DBG] piping through gunzip");
+      await streamPipeline(tee, zlib.createGunzip(), dest);
+    } else {
+      if (debug) console.log("[DBG] piping raw (already JSON)");
+      await streamPipeline(tee, dest);
+    }
+    return;
+  } catch (e) {
+    console.warn("[WARN] First pipeline failed:", e.message);
+    if (looksGzip) {
+      // Retry RAW once (if server double-decompressed on us)
+      console.warn("[WARN] Retrying RAW …");
+      res = await fetchOnce();
+      await streamPipeline(res.body, fs.createWriteStream(outputPath, { flags: "w" }));
+      return;
+    }
+    throw e;
+  }
+}
+
+
+app.get("/health", (req, res) => res.json({ ok: true }));
+
 app.get("/api/decompress", async (req, res) => {
-  const { url, force } = req.query; // <-- define force
+  const { url, force, debug } = req.query;
+  const DEBUG = String(debug) === "1";
   if (!url) return res.status(400).json({ error: "Missing URL param" });
 
   try {
     if (fs.existsSync(TEMP_FILE) && String(force) !== "1") {
+      if (DEBUG) console.log("[DBG] decompress: using cached file", TEMP_FILE);
       return res.json({ success: true, path: TEMP_FILE, cached: true });
     }
 
-    await decompressToDisk(url, TEMP_FILE);
-    res.json({ success: true, path: TEMP_FILE, cached: false });
+    if (DEBUG) console.log("[DBG] decompress: downloading", url, "→", TEMP_FILE);
+    await decompressToDiskSmart(url, TEMP_FILE, { debug: DEBUG });
+    return res.json({ success: true, path: TEMP_FILE, cached: false });
   } catch (e) {
     console.error("Decompression failed:", e);
-    res.status(500).json({ error: e.message });
+    // Bubble up full error text so the frontend shows the real reason
+    return res.status(502).json({ error: String(e.message || e) });
   }
 });
 
@@ -335,7 +399,7 @@ app.get("/api/provider-npis", async (req, res) => {
   const CHUNK = 8 * 1024 * 1024;
 
   if (DEBUG) {
-    console.log(`[DBG] provider-npis: looking for ${requested.size} id(s): ${Array.from(requested).slice(0,5).join(", ")}${requested.size>5?" …":""}`);
+    console.log(`[DBG] provider-npis: looking for ${requested.size} id(s): ${Array.from(requested).slice(0, 5).join(", ")}${requested.size > 5 ? " …" : ""}`);
   }
 
   // --- Phase 1: find "provider_references" token offset ---
@@ -448,7 +512,7 @@ app.get("/api/provider-npis", async (req, res) => {
     }
 
     // once inside the array:
-    if (ch === "{") { capturing = true; objBuf = "{" ; objDepth = 1; return false; }
+    if (ch === "{") { capturing = true; objBuf = "{"; objDepth = 1; return false; }
     if (ch === "[") { arrayDepth++; return false; }
     if (ch === "]") { arrayDepth--; return false; }
 

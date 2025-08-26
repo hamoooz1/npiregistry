@@ -70,7 +70,7 @@ export default function App() {
         out.push({ idx, price, label: String(price) });
       }
     });
-    return out;
+    return out.sort;
   }
 
   function setupPicklistsForMatch(match) {

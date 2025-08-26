@@ -70,7 +70,7 @@ export default function App() {
         out.push({ idx, price, label: String(price) });
       }
     });
-    return out.sort;
+    return out.sort((a, b) => a.price - b.price);
   }
 
   function setupPicklistsForMatch(match) {

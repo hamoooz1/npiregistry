@@ -17,21 +17,6 @@ const PORT = process.env.PORT || 3001;
 const allow = (process.env.CORS_ORIGIN || "*").split(",");
 app.use(cors({ origin: allow, credentials: false }));
 
-async function decompressToDisk(url, outputPath) {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`Failed to fetch: ${res.status}`);
-  }
-  // Ensure the output directory exists
-  const dir = path.dirname(outputPath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  const gunzip = zlib.createGunzip();
-  const destStream = fs.createWriteStream(outputPath);
-  await streamPipeline(res.body, gunzip, destStream);
-}
-
 async function decompressToDiskSmart(url, outputPath, { debug = false } = {}) {
   const headers = { Accept: "*/*", "User-Agent": "npiregistry/0.1 (+local)" };
 
@@ -39,32 +24,42 @@ async function decompressToDiskSmart(url, outputPath, { debug = false } = {}) {
     const r = await fetch(url, { headers });
     if (!r.ok) {
       let snippet = "";
-      try { snippet = (await r.text()).slice(0, 1000); } catch { }
-      throw new Error(`Upstream ${r.status} ${r.statusText}; headers: ${JSON.stringify(Object.fromEntries(r.headers))
-        }; body: ${snippet}`);
+      try {
+        snippet = (await r.text()).slice(0, 1000);
+      } catch {}
+      throw new Error(
+        `Upstream ${r.status} ${r.statusText}; headers: ${JSON.stringify(
+          Object.fromEntries(r.headers)
+        )}; body: ${snippet}`
+      );
     }
     return r;
   };
 
-  // ensure output dir exists
   const dir = path.dirname(outputPath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-  // fetch & peek first chunk to detect gzip
   let res = await fetchOnce();
   const src = res.body;
   const tee = new PassThrough();
   let firstChunk;
 
   await new Promise((resolve, reject) => {
-    src.once("data", (chunk) => { firstChunk = chunk; tee.write(chunk); src.pipe(tee); resolve(); });
+    src.once("data", (chunk) => {
+      firstChunk = chunk;
+      tee.write(chunk);
+      src.pipe(tee);
+      resolve();
+    });
     src.once("error", reject);
   });
 
   const looksGzip = firstChunk && firstChunk[0] === 0x1f && firstChunk[1] === 0x8b;
   if (debug) {
-    console.log(`[DBG] decompress: CE=${res.headers.get("content-encoding") || "(none)"} `
-      + `CT=${res.headers.get("content-type") || "(none)"} looksGzip=${!!looksGzip}`);
+    console.log(
+      `[DBG] decompress: CE=${res.headers.get("content-encoding") || "(none)"} ` +
+        `CT=${res.headers.get("content-type") || "(none)"} looksGzip=${!!looksGzip}`
+    );
   }
 
   const dest = fs.createWriteStream(outputPath, { flags: "w" });
@@ -81,7 +76,6 @@ async function decompressToDiskSmart(url, outputPath, { debug = false } = {}) {
   } catch (e) {
     console.warn("[WARN] First pipeline failed:", e.message);
     if (looksGzip) {
-      // Retry RAW once (if server double-decompressed on us)
       console.warn("[WARN] Retrying RAW …");
       res = await fetchOnce();
       await streamPipeline(res.body, fs.createWriteStream(outputPath, { flags: "w" }));
@@ -90,7 +84,6 @@ async function decompressToDiskSmart(url, outputPath, { debug = false } = {}) {
     throw e;
   }
 }
-
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
@@ -110,11 +103,9 @@ app.get("/api/decompress", async (req, res) => {
     return res.json({ success: true, path: TEMP_FILE, cached: false });
   } catch (e) {
     console.error("Decompression failed:", e);
-    // Bubble up full error text so the frontend shows the real reason
     return res.status(502).json({ error: String(e.message || e) });
   }
 });
-
 
 app.get("/api/proxy-index", async (req, res) => {
   const url = req.query.url;
@@ -133,7 +124,7 @@ app.get("/api/proxy-index", async (req, res) => {
     }
 
     const json = await response.json();
-    res.json(json); // pass back the real JSON from Azure
+    res.json(json);
   } catch (err) {
     console.error("Proxy fetch error:", err);
     res.status(500).json({ error: err.message });
@@ -147,9 +138,9 @@ app.get("/api/filter-by-code", async (req, res) => {
   const DEBUG = String(debug) === "1";
   const USE_FIRST = String(first) === "1";
 
-  if (DEBUG) console.log(`[DBG] Mode: ${USE_FIRST ? "FIRST" : "SEARCH"}; digitCode=${digitCode ?? "(none)"}`);
+  if (DEBUG)
+    console.log(`[DBG] Mode: ${USE_FIRST ? "FIRST" : "SEARCH"}; digitCode=${digitCode ?? "(none)"}`);
 
-  // Only require numeric code when NOT using first=1
   if (!USE_FIRST && !/^\d+$/.test(String(digitCode || ""))) {
     return res.status(400).json({ error: "digitCode must be numeric" });
   }
@@ -160,12 +151,12 @@ app.get("/api/filter-by-code", async (req, res) => {
   const TOKEN = '"in_network"';
   const CHUNK = 8 * 1024 * 1024;
 
-  // --- Phase 1: find "in_network" byte offset (robust across chunk boundaries) ---
   if (DEBUG) console.log('[DBG] Locating "in_network"…');
   let offset = -1;
   {
     const s = fs.createReadStream(TEMP_FILE, { highWaterMark: CHUNK });
-    let base = 0, tail = "";
+    let base = 0,
+      tail = "";
     await new Promise((resolve, reject) => {
       s.on("data", (buf) => {
         const prevTailBytes = Buffer.byteLength(tail, "utf8");
@@ -189,12 +180,15 @@ app.get("/api/filter-by-code", async (req, res) => {
   }
   if (DEBUG) console.log(`[DBG] Found "in_network" at byte ${offset.toLocaleString()}`);
 
-  // --- Phase 2: start at token, find '[' then iterate objects ---
   const stream = fs.createReadStream(TEMP_FILE, { start: offset, highWaterMark: CHUNK });
 
-  let inString = false, escaped = false;
-  let foundArray = false, arrayDepth = 0;
-  let capturing = false, objBuf = "", objDepth = 0;
+  let inString = false,
+    escaped = false;
+  let foundArray = false,
+    arrayDepth = 0;
+  let capturing = false,
+    objBuf = "",
+    objDepth = 0;
 
   function flattenProviderRefs(parsed) {
     const flat = [];
@@ -203,7 +197,10 @@ app.get("/api/filter-by-code", async (req, res) => {
       for (const r of parsed.negotiated_rates) {
         if (Array.isArray(r?.provider_references)) {
           for (const id of r.provider_references) {
-            if (!seen.has(id)) { seen.add(id); flat.push(id); }
+            if (!seen.has(id)) {
+              seen.add(id);
+              flat.push(id);
+            }
           }
         }
       }
@@ -228,8 +225,6 @@ app.get("/api/filter-by-code", async (req, res) => {
   }
 
   function feed(ch) {
-    // If we're currently capturing an object, ALWAYS append the char first,
-    // then update string/brace state. This preserves all quotes.
     if (capturing) {
       objBuf += ch;
 
@@ -238,13 +233,14 @@ app.get("/api/filter-by-code", async (req, res) => {
         else if (ch === "\\") escaped = true;
         else if (ch === '"') inString = false;
       } else {
-        if (ch === '"') { inString = true; escaped = false; }
-        else if (ch === "{") objDepth++;
+        if (ch === '"') {
+          inString = true;
+          escaped = false;
+        } else if (ch === "{") objDepth++;
         else if (ch === "}") objDepth--;
       }
 
       if (!inString && objDepth === 0) {
-        // Completed one object — parse and maybe return
         try {
           const parsed = JSON.parse(objBuf);
           const maybe = tryReturn(parsed);
@@ -255,32 +251,47 @@ app.get("/api/filter-by-code", async (req, res) => {
             console.log("[DBG]   head:", objBuf.slice(0, 120).replace(/\n/g, "\\n"));
           }
         }
-        // reset for next object
         capturing = false;
         objBuf = "";
       }
       return null;
     }
 
-    // Not capturing yet: manage string state only for locating the array open
     if (inString) {
       if (escaped) escaped = false;
       else if (ch === "\\") escaped = true;
       else if (ch === '"') inString = false;
       return null;
     } else {
-      if (ch === '"') { inString = true; escaped = false; return null; }
+      if (ch === '"') {
+        inString = true;
+        escaped = false;
+        return null;
+      }
     }
 
     if (!foundArray) {
-      if (ch === "[") { foundArray = true; arrayDepth = 1; }
+      if (ch === "[") {
+        foundArray = true;
+        arrayDepth = 1;
+      }
       return null;
     }
 
-    // Inside the in_network array but not inside an object yet
-    if (ch === "{") { capturing = true; objBuf = "{"; objDepth = 1; return null; }
-    if (ch === "[") { arrayDepth++; return null; }
-    if (ch === "]") { arrayDepth--; return null; }
+    if (ch === "{") {
+      capturing = true;
+      objBuf = "{";
+      objDepth = 1;
+      return null;
+    }
+    if (ch === "[") {
+      arrayDepth++;
+      return null;
+    }
+    if (ch === "]") {
+      arrayDepth--;
+      return null;
+    }
 
     return null;
   }
@@ -291,8 +302,10 @@ app.get("/api/filter-by-code", async (req, res) => {
       const text = chunk.toString("utf8");
       for (let i = 0; i < text.length && !result; i++) {
         const maybe = feed(text[i]);
-        if (maybe) { result = maybe; break; }
-        // If we’ve exited the array and aren’t capturing, we can stop
+        if (maybe) {
+          result = maybe;
+          break;
+        }
         if (foundArray && arrayDepth === 0 && !capturing) {
           stream.destroy();
           break;
@@ -349,12 +362,7 @@ app.get("/api/fetch-gz", async (req, res) => {
 
     res.setHeader("Content-Type", "application/json");
 
-    // Pipe Azure .gz stream → decompress → response
-    await streamPipeline(
-      response.body,
-      zlib.createGunzip(),
-      res
-    );
+    await streamPipeline(response.body, zlib.createGunzip(), res);
   } catch (err) {
     console.error("Proxy streaming error:", err);
     res.status(500).json({ error: err.message });
@@ -374,7 +382,6 @@ app.get("/api/decompressed-meta", (req, res) => {
   }
 });
 
-
 // GET /api/provider-npis?ids=400.1227337,400.141759&debug=1
 app.get("/api/provider-npis", async (req, res) => {
   const { ids = "", debug } = req.query;
@@ -384,11 +391,10 @@ app.get("/api/provider-npis", async (req, res) => {
     return res.status(404).json({ error: "Decompressed file not found." });
   }
 
-  // normalize requested IDs as strings (we'll compare by string)
   const requested = new Set(
     String(ids)
       .split(",")
-      .map(s => s.trim())
+      .map((s) => s.trim())
       .filter(Boolean)
   );
   if (requested.size === 0) {
@@ -399,14 +405,18 @@ app.get("/api/provider-npis", async (req, res) => {
   const CHUNK = 8 * 1024 * 1024;
 
   if (DEBUG) {
-    console.log(`[DBG] provider-npis: looking for ${requested.size} id(s): ${Array.from(requested).slice(0, 5).join(", ")}${requested.size > 5 ? " …" : ""}`);
+    console.log(
+      `[DBG] provider-npis: looking for ${requested.size} id(s): ${Array.from(requested)
+        .slice(0, 5)
+        .join(", ")}${requested.size > 5 ? " …" : ""}`
+    );
   }
 
-  // --- Phase 1: find "provider_references" token offset ---
   let offset = -1;
   {
     const s = fs.createReadStream(TEMP_FILE, { highWaterMark: CHUNK });
-    let base = 0, tail = "";
+    let base = 0,
+      tail = "";
     await new Promise((resolve, reject) => {
       s.on("data", (buf) => {
         const prevTailBytes = Buffer.byteLength(tail, "utf8");
@@ -430,12 +440,15 @@ app.get("/api/provider-npis", async (req, res) => {
   }
   if (DEBUG) console.log(`[DBG] provider-npis: found token at byte ${offset.toLocaleString()}`);
 
-  // --- Phase 2: stream the array and capture objects one-by-one ---
   const stream = fs.createReadStream(TEMP_FILE, { start: offset, highWaterMark: CHUNK });
 
-  let inString = false, escaped = false;
-  let foundArray = false, arrayDepth = 0;
-  let capturing = false, objBuf = "", objDepth = 0;
+  let inString = false,
+    escaped = false;
+  let foundArray = false,
+    arrayDepth = 0;
+  let capturing = false,
+    objBuf = "",
+    objDepth = 0;
 
   const results = {}; // by_id: { "<id>": { provider_group_id: "<id>", npis: [ ... ] } }
   let remaining = new Set(requested);
@@ -449,14 +462,16 @@ app.get("/api/provider-npis", async (req, res) => {
     for (const g of groups) {
       const npis = Array.isArray(g?.npi) ? g.npi : [];
       for (const n of npis) {
-        if (!seen.has(n)) { seen.add(n); dest.npis.push(n); }
+        if (!seen.has(n)) {
+          seen.add(n);
+          dest.npis.push(n);
+        }
       }
     }
     results[k] = dest;
   }
 
   function feed(ch) {
-    // If capturing an object, append char first, then update state
     if (capturing) {
       objBuf += ch;
 
@@ -465,8 +480,10 @@ app.get("/api/provider-npis", async (req, res) => {
         else if (ch === "\\") escaped = true;
         else if (ch === '"') inString = false;
       } else {
-        if (ch === '"') { inString = true; escaped = false; }
-        else if (ch === "{") objDepth++;
+        if (ch === '"') {
+          inString = true;
+          escaped = false;
+        } else if (ch === "{") objDepth++;
         else if (ch === "}") objDepth--;
       }
 
@@ -477,9 +494,12 @@ app.get("/api/provider-npis", async (req, res) => {
           if (remaining.has(idStr)) {
             appendNPIs(parsed);
             remaining.delete(idStr);
-            if (DEBUG) console.log(`[DBG] provider-npis: found id ${idStr}, remaining=${remaining.size}`);
+            if (DEBUG)
+              console.log(
+                `[DBG] provider-npis: found id ${idStr}, remaining=${remaining.size}`
+              );
             if (remaining.size === 0) {
-              stream.destroy(); // we have all requested
+              stream.destroy();
               return true;
             }
           }
@@ -489,32 +509,47 @@ app.get("/api/provider-npis", async (req, res) => {
             console.log("[DBG]   head:", objBuf.slice(0, 100).replace(/\n/g, "\\n"));
           }
         }
-        // reset for next object
         capturing = false;
         objBuf = "";
       }
       return false;
     }
 
-    // not capturing: handle string state for array detection
     if (inString) {
       if (escaped) escaped = false;
       else if (ch === "\\") escaped = true;
       else if (ch === '"') inString = false;
       return false;
     } else {
-      if (ch === '"') { inString = true; escaped = false; return false; }
+      if (ch === '"') {
+        inString = true;
+        escaped = false;
+        return false;
+      }
     }
 
     if (!foundArray) {
-      if (ch === "[") { foundArray = true; arrayDepth = 1; }
+      if (ch === "[") {
+        foundArray = true;
+        arrayDepth = 1;
+      }
       return false;
     }
 
-    // once inside the array:
-    if (ch === "{") { capturing = true; objBuf = "{"; objDepth = 1; return false; }
-    if (ch === "[") { arrayDepth++; return false; }
-    if (ch === "]") { arrayDepth--; return false; }
+    if (ch === "{") {
+      capturing = true;
+      objBuf = "{";
+      objDepth = 1;
+      return false;
+    }
+    if (ch === "[") {
+      arrayDepth++;
+      return false;
+    }
+    if (ch === "]") {
+      arrayDepth--;
+      return false;
+    }
 
     return false;
   }
@@ -524,8 +559,11 @@ app.get("/api/provider-npis", async (req, res) => {
     stream.on("data", (chunk) => {
       const text = chunk.toString("utf8");
       for (let i = 0; i < text.length; i++) {
-        if (feed(text[i])) { completedEarly = true; break; }
-        if (foundArray && arrayDepth === 0 && !capturing) { // end of array
+        if (feed(text[i])) {
+          completedEarly = true;
+          break;
+        }
+        if (foundArray && arrayDepth === 0 && !capturing) {
           stream.destroy();
           break;
         }
@@ -536,10 +574,12 @@ app.get("/api/provider-npis", async (req, res) => {
   });
 
   const found = Object.keys(results);
-  const missing = Array.from(requested).filter(id => !results[id]);
+  const missing = Array.from(requested).filter((id) => !results[id]);
 
   if (DEBUG) {
-    console.log(`[DBG] provider-npis: done. found=${found.length}, missing=${missing.length}, earlyStop=${completedEarly}`);
+    console.log(
+      `[DBG] provider-npis: done. found=${found.length}, missing=${missing.length}, earlyStop=${completedEarly}`
+    );
   }
 
   return res.json({ by_id: results, found, missing });
@@ -554,7 +594,7 @@ app.get("/api/npi", async (req, res) => {
   try {
     const url = `https://npiregistry.cms.hhs.gov/api/?version=2.1&number=${number}`;
     const r = await fetch(url, { headers: { Accept: "application/json" } });
-    const body = await r.text(); // pass-through (and better error text)
+    const body = await r.text(); // pass-through (and better upstream error text)
     res.status(r.status);
     res.setHeader("Content-Type", "application/json");
     return res.send(body);
@@ -562,7 +602,6 @@ app.get("/api/npi", async (req, res) => {
     return res.status(502).json({ error: `Upstream error: ${e.message}` });
   }
 });
-
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
